@@ -1,0 +1,228 @@
+---
+title: "7313 Data Science Analytics"
+output: webexercises::webexercises_default
+---
+
+```{r setup, include = FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+
+library(webexercises)
+
+```
+
+`r style_widgets(correct = "green")`
+
+<a name="top"></a>
+
+This page provides lab instructions for the *Data Preparation* module of 7313 Data Science Analytics at [Stockholm School of Economics](https://www.hhs.se).
+
+*NOTE: For this page to work properly, you need to have a JavaScript-enabled browser. If things are not showing, or appear broken, please ask for a printed copy of the lab instructions.*
+
+***
+
+# The lab
+
+The purpose of this lab is to practice data preparation through data wrangling. The lab consists of two parts. First, importing data from the MySQL-database to R. Second, handling missing data. 
+
+***
+
+Throughout the lab, there will be buttons like the one below. These provide answers to questions in the text.
+
+`r hide("Click me")`
+<img src="http://giphygifs.s3.amazonaws.com/media/kKdgdeuO2M08M/giphy.gif" />
+`r unhide()`
+
+***
+
+There will also be some short questions for you to fill in.
+
+The primary function of these questions is to work as checkpoints for yourself—a kind of receipt that you are following along and understand what you are doing. The exact format of the questions may differ, but they are all <span style="color:blue">__blue__</span> when the answer is missing or wrong, and they turn <span style="color:green">__green__</span> when you enter the correct answer.
+
+***
+
+#### 1. Importing data from the MySQL-database into R
+
+For the purpose of this lab, the target "Proportion of Returns per Item" (named prop_returns) and the features "Division" (i.e., division_desc), and "Label" (i.e., sustainability_id_desc) are imported from the MySQL-database. 
+
+`r hide("Hint 1")`
+The proportion of returns per item is given by the sum of "returned" divided by the count of "returned". 
+`r unhide()`
+
+`r hide("Hint 2")`
+Use an inner join, since not all items are sold.
+`r unhide()`
+
+Connect to the database and import the dataset.
+
+```{r sql_get, include = FALSE}
+library(RMySQL) 
+con = dbConnect(MySQL(), dbname = "BnL",
+                host = "mysql-1.cda.hhs.se", port = 3306,
+                user = "bnl", password = "bnl@sse")
+df = dbGetQuery(con, 
+                "SELECT 
+                  item, 
+                  SUM(returned)/COUNT(returned) AS prop_returned, 
+                  MIN(division_desc) AS division_desc, 
+                  MIN(sustainability_id_desc) AS sustainability_id_desc 
+                FROM Products 
+                INNER JOIN Transactions 
+                  USING (item) 
+                GROUP BY item")
+```
+
+The first 6 rows should look like this:
+
+```{r head}
+head(df)
+```
+
+Take a glimpse of the data:
+
+```{r glimpse}
+summary(df)
+```
+
+The class of division and label is: `r fitb("character", ignore_case = TRUE)`. Transform them to factors and re-iterate. 
+
+```{r to_factor, include = FALSE}
+df$division_desc = as.factor(df$division_desc)
+df$sustainability_id_desc = as.factor(df$sustainability_id_desc)
+summary(df)
+```
+
+From the glimpse of data, we learn:
+
+* The target in fact has a `r mcq(c("high", answer = "low"))`  proportion of returned products
+
+* The target variable contain missing values: `r mcq(c("Yes", answer = "No"))`
+
+* There are `r fitb(nlevels(df$division_desc))` possible classes of "Division"  
+
+* There are `r fitb(nlevels(df$sustainability_id_desc))` possible classes of "Labels" 
+
+* The feature variables contain missing values: `r mcq(c(answer = "Yes", "No"))`
+
+#### 2. Handling missing data 
+
+We have just learned that we have missing values in our dataset. There are three main ways of handling missing data:
+
+1. Omit
+2. Impute mean
+3. Impute predictions
+
+If we omit all missing values (case-wise), how many observations would remain?
+
+`r fitb(nrow(na.omit(df)))`
+
+We lose many observations, but foremost we would have problems making predictions if our model does not handle missing values (the machine cannot make prediction for unseen data if features are missing).
+
+If we impute the mean, how do we handle the fact that our features are categorical?
+
+`r hide("Example solutions")`
+* Impute the most common class (the mode)
+* Use one-hot encoding, impute the mean
+`r unhide()`
+
+What is the mean proportion of returned products for the Beauty-division, when omitting missing values vs. when imputing the most common class of division?  
+
+```{r impute_mode, include = F}
+df.impute = df
+max.division = names(sort(table(df.impute$division_desc), decreasing = TRUE)[1])
+df.impute$division_desc[is.na(df.impute$division_desc)] = max.division
+```
+
+It is `r fitb(round(mean(na.omit(df[df$division_desc=="Beauty",])$prop_returned),4))` vs. `r fitb(round(mean(df.impute[df.impute$division_desc=="Beauty",]$prop_returned),4))` (use 4 decimals).
+
+That means that depending on how we deal with missing values, the model will learn differently from data. 
+
+Finally, one of the features have less (or different) missing values than the other with missing values, we could try to infer values to impute more fine-grained (e.g., three of the labels are only used in the Beauty-division). What is more, we can use machine learning to predict the missing values. This, you will learn in the next module. 
+
+***
+
+Well done! This concludes the *Data Preparation*-module. Now, prepare a dataset containing one target variable and five predictors (these can be different than the once you decided on in the previous hand-in). You should prepare data using SQL, then import data into R. Please modify the enclosed RMarkdown-file, available through Canvas, and hand in the pdf output.
+
+***
+
+# Acknowledgements
+
+This page was built in R using the amazing [webex package](https://github.com/PsyTeachR/webex) and a template created by the [psychology teaching team at the University of Glasgow](http://www.psy.gla.ac.uk).
+
+***
+
+[Back to the top.](#top)
+
+***
+
+<!--
+# SLASK
+
+The webex package provides a number of functions that you use in [inline R code](https://github.com/rstudio/cheatsheets/raw/master/rmarkdown-2.0.pdf) to create HTML widgets (text boxes, pull down menus, buttons that reveal hidden content). Examples are given below. Knit this file to HTML to see how it works.
+
+**NOTE: To use the widgets in the compiled HTML file, you need to have a JavaScript-enabled browser. The widgets don't work in the built-in RStudio browser. In the built-in browser, click the "Open in Browser" button to open the file in your operating system's browser.**
+
+## Fill-In-The-Blanks (`fitb()`)
+
+Create fill-in-the-blank questions using `fitb()`, providing the answer as the first argument.
+
+- 2 + 2 is `r fitb("4")`
+
+You can also create these questions dynamically, using variables from your R session.
+
+```{r echo = FALSE}
+x <- sample(2:8, 1)
+```
+
+- The square root of `r x^2` is: `r fitb(x)`
+
+The blanks are case-sensitive; if you don't care about case, use the argument `ignore_case = TRUE`.
+
+- What is the letter after D? `r fitb("E", ignore_case = TRUE)`
+
+If you want to ignore differences in whitespace use, use the argument `ignore_ws = TRUE` (which is the default) and include spaces in your answer anywhere they could be acceptable.
+
+- How do you load the tidyverse package? `r fitb(c("library( tidyverse )", "library( \"tidyverse\" )", "library( 'tidyverse' )"), ignore_case = TRUE, width = "20", regex = TRUE)`
+
+You can set more than one possible correct answer by setting the answers as a vector.
+
+- Type a vowel: `r fitb(c("A", "E", "I", "O" , "U"), ignore_case = TRUE)`
+
+## Multiple Choice (`mcq()`)
+
+- "Never gonna give you up, never gonna: `r mcq(c("let you go", "turn you down", "run away", answer = "let you down"))`"
+- "I `r mcq(c(answer = "bless the rains", "guess it rains", "sense the rain"))` down in Africa" -Toto
+
+## True or False (`torf()`)
+
+- True or False? You can permute values in a vector using `sample()`. `r torf(TRUE)`
+
+## Hidden solutions and hints
+
+You can fence off a solution area that will be hidden behind a button using `hide()` before the solution and `unhide()` after, each as inline R code.  Pass the text you want to appear on the button to the `hide()` function.
+
+If the solution is an RMarkdown code chunk, instead of using `hide()` and `unhide()`, simply set the `webex.hide` chunk option to TRUE, or set it to the string you wish to display on the button.
+
+### Example problem
+
+**Recreate the scatterplot below, using the built-in `cars` dataset.**
+
+```{r echo = FALSE}
+with(cars, plot(speed, dist))
+```
+
+`r hide("I need a hint")`
+See the *documentation* for `plot()` (`?plot`)
+`r unhide()`
+
+-->
+
+<!-- note: you could also just set webex.hide to TRUE -->
+
+<!-- TO CHANGE WIDGET COLOURS:
+  move command below out of this HTML comment area
+  and then re-compile;
+  unfilled becomes yellow, correct becomes pink 
+     
+`r style_widgets("#FFFF00", "#FF3399")`
+-->

@@ -1,0 +1,584 @@
+---
+title: "7313 Hand-in - Assignment 3"
+author: Group 3
+date: '2021-12-06'
+output:
+  pdf_document: 
+    fig_height: 3
+  html_notebook: default
+header-includes:
+- \usepackage{fancyhdr}
+- \pagestyle{fancy}
+- \fancyhead[C]{Data Science Analytics}
+- \fancyfoot[C]{\thepage}
+---
+
+```{r, include = FALSE, message = FALSE}
+#Load libraries
+library(RMySQL) 
+library(tidyverse)
+library(mice)
+library(data.table)
+library(corrplot)
+library(GGally)
+library(modeest) 
+library(DBI)
+library(caTools)
+library(ggfortify)
+library(caret)
+library(boot)
+library(pROC)
+library(ggpubr)
+library(ROSE)
+library(rpart.plot)
+```
+
+#Data Import
+```{r, message = FALSE}
+#Creating connection to MySQL database
+con = dbConnect(MySQL(), dbname = "BnL",
+                host = "mysql-1.cda.hhs.se", port = 3306,
+                user = "bnl", password = "bnl@sse")
+#lapply( dbListConnections( dbDriver( drv = "MySQL")), dbDisconnect)
+```
+
+```{r, message = FALSE}
+#Loading data into R
+df <- dbGetQuery(con,"SELECT IF(SUM(IF(quantity<0,ABS(quantity),0))/SUM(IF(quantity>=0,quantity,0))>0.5,1,0) AS returned, SUM(IF(amount>=0,amount,0))/SUM(IF(quantity>=0,quantity,0)) AS avg_amount, SUM(IF(discount>=0,discount,0))/SUM(IF(quantity>=0,quantity,0)) AS avg_discount, SUM(IF(quantity>=0,quantity,0)) AS total_quantity, MIN(sustainability_id_desc) AS sustainable, MIN(dept_desc) AS category
+FROM Transactions t LEFT JOIN Products p
+USING(item)
+GROUP BY(item)")
+
+glimpse(df)
+summary(df)
+```
+
+#Data Preparation
+##Checking for missing values
+```{r, message = FALSE}
+#Checking for missing values
+contains.missing <- df %>% 
+  filter_all(any_vars(is.na(.))) %>% 
+  select_if(function(x) any(is.na(x)))
+#contains.missing
+
+df %>% 
+  sapply(function(x) sum(is.na(x)))
+md.pattern(df, rotate.names = T)
+```
+
+##Imputing missing values
+```{r, message = FALSE}
+#Imputation of missing values
+##Mode imputation for variables of type character and mean imputation for variables of type double
+mode_category <- df %>% 
+  filter(!is.na(category)) %>% 
+  count(category) %>% 
+  top_n(1, n) %>% 
+  select(category) %>% 
+  unlist(use.names = F)
+mode_sustainable <- df %>% 
+  filter(!is.na(sustainable)) %>% 
+  count(sustainable) %>% 
+  top_n(1, n) %>% 
+  select(sustainable) %>% 
+  unlist(use.names = F)
+
+df_clean <- df %>% 
+  mutate(avg_amount = ifelse(is.na(avg_amount), mean(avg_amount, na.rm = T), avg_amount),
+         avg_discount = ifelse(is.na(avg_discount), mean(avg_discount, na.rm = T), avg_discount),
+         category = ifelse(is.na(category), mode_category, category),
+         sustainable = ifelse(is.na(sustainable), mode_sustainable, sustainable))
+
+#Final check
+df_clean %>% 
+  sapply(function(x) sum(is.na(x)))
+md.pattern(df_clean, rotate.names = T)
+#summary(df_clean)
+glimpse(df_clean)
+
+#Remove modes + support table
+remove(mode_category, mode_sustainable, contains.missing)
+```
+
+##Adjusting variables
+```{r, message = FALSE}
+#Exclusion of non-product-related observations (Receipt texts, Gift With Purchase, Marketing Material, Sales Kicks E-commerce)
+df_clean <- df_clean %>% 
+  mutate(no_product = ifelse(category == "Receipt texts", 1, 
+                             ifelse(category == "Gift With Purchase", 1,
+                                    ifelse(category == "Marketing Material", 1, 
+                                           ifelse(category == "Sales Kicks E-commerce", 1, 0)))))
+df_clean <- df_clean %>% 
+  filter(no_product == 0)
+df_clean <- df_clean %>% 
+  select(-no_product)
+```
+
+##Creating new variables
+```{r, message = FALSE}
+##Sustainable
+df_clean <- df_clean %>% 
+  mutate(sustainable = ifelse(sustainable == "Environmentally labelled", "sustainable", 
+                              ifelse(sustainable == "Organic", "sustainable", 
+                                     ifelse(sustainable == "Social responsibility", "sustainable",
+                                            ifelse(sustainable == "Sustainable material", "sustainable", "non-sustainable")))))
+      
+##Category
+###Pool rare categories under "Miscellaneous" since no representative amounts (1-22 per category)
+df_clean  <- df_clean  %>% 
+  mutate(category = ifelse(category == "Makeup B", "Makeup",
+                            ifelse(category == "Makeup PL", "Makeup",
+                                   ifelse(category == "Face B", "Face", 
+                                          ifelse(category == "Face PL", "Face",
+                                                 ifelse(category == "Body B", "Body",
+                                                        ifelse(category == "Body PL", "Body",
+                                                               ifelse(category == "Hair B", "Hair",
+                                                                      ifelse(category == "Hair PL", "Hair",
+                                                                             ifelse(category == "Hair C", "Hair",
+                                                                                    ifelse(category == "Fragrance B", "Fragrance",
+                                                                                           ifelse(category == "Fragrance PL", "Fragrance",
+                                                                                                  ifelse(category == "Womens Accessories C", "Accessories",
+                                                                                                         ifelse(category == "Childrens Acc C", "Accessories", "Miscellaneous"))))))))))))))
+```
+
+##Creating dummy variables for categories
+```{r}
+#Creating dummy variables for sustainable and category
+dmy <- dummyVars(" ~ .", data = df_clean)
+df_clean <- data.frame(predict(dmy, newdata = df_clean))
+remove(dmy)
+```
+
+##Ensuring correct data types
+```{r, message = FALSE}
+#Ensuring correct data types
+glimpse(df_clean)
+
+df_final <- df_clean %>% 
+  mutate(returned = as.factor(ifelse(returned == 1, "yes", "no")),
+         total_quantity = as.integer(total_quantity),
+         non_sustainable = as.factor(ifelse(sustainablenon.sustainable == 1, "yes", "no")),
+         sustainable = as.factor(ifelse(sustainablesustainable == 1, "yes", "no")),
+         accessories = as.factor(ifelse(categoryAccessories == 1, "yes", "no")),
+         body = as.factor(ifelse(categoryBody == 1, "yes", "no")),
+         face = as.factor(ifelse(categoryFace == 1, "yes", "no")),
+         fragrance = as.factor(ifelse(categoryFragrance == 1, "yes", "no")),
+         hair = as.factor(ifelse(categoryHair == 1, "yes", "no")),
+         makeup = as.factor(ifelse(categoryMakeup == 1, "yes", "no")),
+         miscellaneous  = as.factor(ifelse(categoryMiscellaneous == 1, "yes", "no"))) %>% 
+  select(-sustainablenon.sustainable, -sustainablesustainable, -categoryAccessories, -categoryBody, -categoryFace, -categoryFragrance, -categoryHair, -categoryMakeup, -categoryMiscellaneous)
+```
+
+##Creation of train and test set
+```{r}
+#Partitioning dataset into training (70%) and test set (30%) 
+set.seed(7313)   
+smp_siz = round(0.7*nrow(df_final))
+train_row = sample(seq_len(nrow(df_final)),size = smp_siz)  
+train = df_final[train_row,]
+test = df_final[-train_row,]
+remove(train_row)
+```
+
+#Handling data imbalance
+```{r}
+#Handling Data Imbalance (underrepresentation of returns -> bias-variance-tradeoff)
+gghistogram(train, x = "returned", stat ="count", fill = "returned")
+train <- ovun.sample(returned ~. , data = train, method = "both", p = 0.5, seed = 7313)$data
+gghistogram(train, x = "returned", stat ="count", fill = "returned")
+```
+
+```{r}
+#Overview of final train set
+str(train)
+summary(train)
+```
+
+#Modeling
+##Regressions 
+###Logistic Regression
+```{r}
+train.control <- trainControl(method = "repeatedcv", 
+                              number = 10,
+                              repeats = 10,
+                              verboseIter = F,
+                              classProbs = T,
+                              summaryFunction = prSummary)
+
+set.seed(7313)
+simple.logistic.regression <- train(returned ~ .,
+                                    data = train,
+                                    method = "glm",
+                                    metric = "Recall", #AUC
+                                    trControl = train.control)
+
+simple.logistic.regression
+summary(simple.logistic.regression)
+
+confusionMatrix(simple.logistic.regression)
+#Accuracy (average) : 0.77
+```
+
+###Stepwise Linear, Lasso & Ridge Regression
+```{r}
+train.control <- trainControl(method = "repeatedcv",
+						number = 10,
+						repeats = 10,
+						verboseIter = F,
+						classProbs = T)
+
+set.seed(7313)
+stepwise.logistic.regression <- train(returned ~ .,
+							 data = train,
+							 method = "glmStepAIC",
+							 metric = "Recall",
+							 trControl = train.control,
+							 trace = 0) 
+summary(stepwise.logistic.regression)
+confusionMatrix(stepwise.logistic.regression)
+#Accuracy (average) : 0.7699
+
+set.seed(7313)
+tuning.grid <- expand.grid(lambda = 10^seq(2, -2, length = 100),
+					  alpha = 1)
+lasso.logistic.regression <- train(returned ~ .,
+						   data = train,
+						   method = "glmnet",
+						   metric = "Recall",
+						   trControl = train.control,
+						   tuneGrid = tuning.grid)
+autoplot(lasso.logistic.regression$finalModel) + 
+	theme_minimal() 
+confusionMatrix(lasso.logistic.regression)
+#Accuracy (average) : 0.7561
+
+set.seed(7313)
+tuning.grid <- expand.grid(lambda = 10^seq(2, -2, length = 100),
+					  alpha = 0)
+ridge.logistic.regression <- train(returned ~ .,
+						   data = train,
+						   method = "glmnet",
+						   metric = "Recall",
+						   trControl = train.control,
+						   tuneGrid = tuning.grid)
+autoplot(ridge.logistic.regression$finalModel) + 
+	theme_minimal() 
+confusionMatrix(ridge.logistic.regression)
+#Accuracy (average) : 0.7034
+
+resamps <- resamples(list(glm = simple.logistic.regression,
+                          step = stepwise.logistic.regression,
+                          lasso = lasso.logistic.regression,
+                          ridge = ridge.logistic.regression))
+
+
+summary(resamps)
+bwplot(resamps, layout = c(2, 1), scales = list(relation = "free"))
+```
+
+##Decision Tree
+```{r}
+train.control <- trainControl(method = "cv",
+                              number = 10,
+                              classProbs = T,
+                              savePredictions = "final",
+                              summaryFunction = prSummary)
+
+set.seed(7313)
+decision.tree <- train(returned ~ .,
+                       data = train,
+                       method = "rpart",
+                       metric = "Recall", #AUC, Accuracy
+                       trControl = train.control,
+                       tuneLength = 10)
+
+rpart.plot(decision.tree$finalModel, 
+           type = 0) 
+
+confusionmatrix = confusionMatrix(decision.tree$pred$pred, 
+                decision.tree$pred$obs, 
+                positive = "yes") 
+confusionmatrix
+confusionMatrix(decision.tree)
+
+levels(decision.tree$pred$obs)
+twoClassSummary(decision.tree$pred, lev = levels(decision.tree$pred$obs))
+prSummary(decision.tree$pred, lev = levels(decision.tree$pred$obs))
+#AUC: 0.8060105, ROC: 0.8276314
+#F: 0.7811011
+#Sens: 0.7369356, Spec: 0.8495176, Recall: 0.7369356, Precision: 0.8308979
+```
+
+##Random Forest
+```{r}
+train.control <- trainControl(method = "cv",
+                              number = 10,
+                              classProbs = T,
+                              savePredictions = "final",
+                              summaryFunction = prSummary)
+
+set.seed(7313)
+random.forest <- train(returned ~ .,
+                       data = train,
+                       method = "ranger",
+                       metric = "Recall",
+                       trControl = train.control,
+                       tuneLength = 5,
+                       importance = 'impurity')
+
+ggplot(random.forest) +
+	theme_minimal()
+
+defaultSummary(random.forest$pred)
+
+confusionmatrix = confusionMatrix(random.forest$pred$pred, 
+                                  random.forest$pred$obs, 
+                                  positive = "yes") 
+confusionmatrix
+confusionMatrix(random.forest)
+
+
+levels(random.forest$pred$obs)
+twoClassSummary(random.forest$pred, lev = levels(random.forest$pred$obs))
+prSummary(random.forest$pred, lev = levels(random.forest$pred$obs))
+#AUC: 0.2425855, ROC: 0.9934193
+#F: 0.9826688
+#Sens: 0.9659281, Spec: 1.0, Recall: 0.9659281, Precision: 1.0
+#Accuracy (average): 0.9829
+```
+
+##Boosted Trees
+```{r}
+train.control <- trainControl(method = "cv",
+                              number = 10,
+                              classProbs = T,
+                              savePredictions = "final",
+                              summaryFunction = prSummary)
+
+set.seed(7313)
+boosted.trees <- train(returned ~ .,
+                       data = train,
+                       method = "xgbTree",
+                       metric = "Recall",
+                       trControl = train.control,
+                       tuneLength = 5)
+
+defaultSummary(boosted.trees$pred)
+
+levels(boosted.trees$pred$obs)
+twoClassSummary(boosted.trees$pred, lev = levels(boosted.trees$pred$obs))
+prSummary(boosted.trees$pred, lev = levels(boosted.trees$pred$obs))
+
+confusionmatrix =  confusionMatrix(boosted.trees$pred$pred, 
+                boosted.trees$pred$obs, 
+                positive = "yes") 
+confusionmatrix
+confusionMatrix(boosted.trees)
+#AUC: 0.8467397, ROC: 0.9931398
+#F: 0.9819652
+#Sens: 0.9645694, Spec: 1.0, Recall: 0.9645694, Precision: 1.0
+#Accuracy (average) : 0.9823
+```
+
+#Variable Importance
+```{r}
+simple.logistic.regression %>% 
+	varImp() %>% 
+	ggplot() +
+	theme_minimal() +
+	theme(axis.text.y = element_text(size = 8))
+
+stepwise.logistic.regression %>% 
+	varImp() %>% 
+	ggplot() +
+	theme_minimal() +
+	theme(axis.text.y = element_text(size = 8))
+
+lasso.logistic.regression %>% 
+	varImp() %>% 
+	ggplot() +
+	theme_minimal() +
+	theme(axis.text.y = element_text(size = 8))
+
+ridge.logistic.regression %>% 
+	varImp() %>% 
+	ggplot() +
+	theme_minimal() +
+	theme(axis.text.y = element_text(size = 8))
+
+decision.tree %>% 
+	varImp() %>% 
+	ggplot() +
+	theme_minimal() +
+	theme(axis.text.y = element_text(size = 8))
+
+random.forest %>% 
+	varImp() %>% 
+	ggplot() +
+	theme_minimal() +
+	theme(axis.text.y = element_text(size = 8))
+
+boosted.trees %>% 
+  varImp() %>% 
+	ggplot() +
+	theme_minimal() +
+	theme(axis.text.y = element_text(size = 8))
+```
+
+#Model Comparison
+```{r}
+resamples1 <- resamples(list("Logistic Regression" = simple.logistic.regression,
+                             "Stepwise Logistic Regression" = stepwise.logistic.regression,
+                             "Lasso Logistic Regression" = lasso.logistic.regression,
+                             "Ridge Logistic Regression" = ridge.logistic.regression))
+
+resamples2 <- resamples(list("Decision Tree" = decision.tree,
+                             "Random Forest" = random.forest,
+                             "Boosted Tree" = boosted.trees))
+                     
+summary(resamples1)
+summary(resamples2)
+bwplot(resamples1)
+bwplot(resamples2)
+```
+
+#Model Evaluation
+## Making Predictions on the test datasets
+```{r}
+#Logistic Regression 
+test.predictions <- data.frame(pred = predict(simple.logistic.regression, newdata = test),
+                               obs = test$returned)
+
+prob.predictions <- predict(simple.logistic.regression, newdata = test, type = "prob")
+
+test.predictions <- bind_cols(test.predictions, prob.predictions)
+test.predictions <- test.predictions %>% 
+  mutate(obs = as.factor(obs)) %>% 
+  mutate(obs = factor(obs, levels = c("no", "yes")))
+
+confusionMatrix(test.predictions$pred,
+                test.predictions$obs)
+
+twoClassSummary(test.predictions, lev = c("no", "yes"))
+prSummary(test.predictions, lev = c("no", "yes"))
+#AUC: 0.8964427, ROC: 0.8368966
+#Precision: 0.9994293, Recall:  0.6451375, Sens: 0.6451375, Spec: 0.9302326
+#F: 0.7841206, Accuracy:    
+
+
+#Decision Tree
+test.predictions <- data.frame(pred = predict(decision.tree, newdata = test),
+                               obs = test$returned)
+
+prob.predictions <- predict(decision.tree, newdata = test, type = "prob")
+
+test.predictions <- bind_cols(test.predictions, prob.predictions)
+test.predictions <- test.predictions %>% 
+  mutate(obs = as.factor(obs)) %>% 
+  mutate(obs = factor(obs, levels = c("no", "yes")))
+
+confusionMatrix(test.predictions$pred,
+                test.predictions$obs)
+
+twoClassSummary(test.predictions, lev = c("no", "yes"))
+prSummary(test.predictions, lev = c("no", "yes"))
+#AUC: 0.4598530, ROC: 0.8185267
+#Precision: 0.9988504, Recall: 0.7468075, Sens: 0.7468075, Spec: 0.8372093
+#F: 0.8546336, Accuracy:   
+
+#Random Forest
+test.predictions <- data.frame(pred = predict(random.forest, newdata = test),
+                               obs = test$returned)
+
+prob.predictions <- predict(random.forest, newdata = test, type = "prob")
+
+test.predictions <- bind_cols(test.predictions, prob.predictions)
+test.predictions <- test.predictions %>% 
+  mutate(obs = as.factor(obs)) %>% 
+  mutate(obs = factor(obs, levels = c("no", "yes")))
+
+confusionMatrix(test.predictions$pred,
+                test.predictions$obs)
+
+twoClassSummary(test.predictions, lev = c("no", "yes"))
+prSummary(test.predictions, lev = c("no", "yes"))
+prSummary(test.predictions, lev = c("no", "yes"))
+#AUC: 0.2578133, ROC: 0.6469408
+#Precision: 0.9951697, Recall:  0.9613212, Sens: 0.9613212, Spec: 0.1162791
+#F: 0.9779527, Accuracy: 0.9569  
+
+
+#Boosted Trees
+test.predictions <- data.frame(pred = predict(boosted.trees, newdata = test),
+                               obs = test$returned)
+
+prob.predictions <- predict(boosted.trees, newdata = test, type = "prob")
+
+test.predictions <- bind_cols(test.predictions, prob.predictions)
+test.predictions <- test.predictions %>% 
+  mutate(obs = as.factor(obs)) %>% 
+  mutate(obs = factor(obs, levels = c("no", "yes")))
+
+confusionMatrix(test.predictions$pred,
+                test.predictions$obs)
+
+twoClassSummary(test.predictions, lev = c("no", "yes"))
+prSummary(test.predictions, lev = c("no", "yes"))
+prSummary(test.predictions, lev = c("no", "yes"))
+#AUC: 0.7617215, ROC: 0.8150900
+#Precision: 0.9953028, Recall: 0.9626719, Sens: 0.9626719, Spec: 0.1395349
+#F: 0.9787154, Accuracy: 0.9583 
+```
+
+#Model Tuning
+##Adjusting datasets
+```{r}
+train.tuned <- train %>% 
+  select(returned, avg_amount, avg_discount, total_quantity)
+
+test.tuned <- test %>% 
+  select(returned, avg_amount, avg_discount, total_quantity)
+```
+
+##Random Forest (Final Model)
+```{r}
+train.control <- trainControl(method = "cv",
+                              number = 2,
+                              classProbs = T,
+                              savePredictions = "final",
+                              summaryFunction = prSummary) 
+
+set.seed(7313)
+random.forest.tuned <- train(returned ~ .,
+                             data = train.tuned,
+                             method = "ranger",
+                             metric = "Recall",
+                             trControl = train.control,
+                             tuneLength = 5,
+                             num.trees = 2,
+                             importance = 'impurity')
+
+test.predictions <- data.frame(pred = predict(random.forest.tuned, newdata = test.tuned),
+                               obs = test.tuned$returned)
+
+prob.predictions <- predict(random.forest.tuned, newdata = test.tuned, type = "prob")
+
+test.predictions <- bind_cols(test.predictions, prob.predictions)
+test.predictions <- test.predictions %>% 
+  mutate(obs = as.factor(obs)) %>% 
+  mutate(obs = factor(obs, levels = c("no", "yes")))
+
+confusionMatrix(test.predictions$pred,
+                test.predictions$obs)
+
+twoClassSummary(test.predictions, lev = c("no", "yes"))
+prSummary(test.predictions, lev = c("no", "yes"))
+prSummary(test.predictions, lev = c("no", "yes"))
+#AUC: 0.06292633, ROC: 0.5506165
+#Precision: 0.99524544, Recall:  0.95100688, Sens: 0.9510069, Spec: 0.1395349
+#F: 0.97262338, Accuracy: 0.9467  
+```
+
+
+

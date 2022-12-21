@@ -1,0 +1,133 @@
+---
+title: "7313 Take-Home Exam"
+output: pdf_document
+## no author, anonymous grading
+---
+
+```{r, include = FALSE, message = FALSE}
+# Load libraries
+library(RMySQL) 
+library(caret)
+library(randomForest)
+library(MLmetrics)
+library(ranger)
+library(tidyverse)
+```
+
+```{r sql_con, include = FALSE}
+#Notice the naming of the code chunks, these are used for debugging
+con = dbConnect(MySQL(), dbname = "BnS",
+                host = "mysql-1.cda.hhs.se", port = 3306,
+                user = "bns", password = "bns@sse")
+```
+
+# Importing from SQL
+```{r import, message = FALSE, warning = FALSE}
+df = dbGetQuery(con, 
+  "SELECT 
+    receipt_id,
+    amount,
+    quantity,
+    MONTH(purchase_date) AS month,
+    age,
+    m_status,
+    gender,
+    enrollment,
+    MAX(is_online) AS is_online
+  FROM Transactions
+    LEFT JOIN Customers
+    USING (customer_id)
+    LEFT JOIN Unseen 
+    USING (receipt_id)
+  WHERE id42205 = 1 ##change to your studentid
+    OR is_online IS NOT NULL
+  GROUP BY receipt_id")
+```
+
+```{r, include=F}
+lapply( dbListConnections( dbDriver( drv = "MySQL")), dbDisconnect)
+```
+
+# Data preparation
+## I decided to include the variables you can see in the MySQL import mostly for plausability reasons. The customer variable 'created' has no straight forward relationship with 'is_online'. The subscription variables ('no_contact', 'no_email', etc.) also can't plausibly predict whether a transaction is online; there is no causal rationale. The model might fit well to the values of these variables, but I would question external validity questionable then. Originally, I included the variable 'city'. There are 365,126 missing value for 'city'. This is 85.30% of all values. I ignore this variable, since no appropriate imputation can be determined (the mode is unlikely to deliver a representative result).
+
+```{r NAs}
+for(i in 1:ncol(df)) {print(paste(colnames(df)[i], "has", toString(sum(is.na(df[, i]))), "missing values."))}
+```
+
+## 1 missing value for age. 1 missing value for m_status. 1 missing value for gender. Looking at the data, it becomes apparent that 'customer_id' in Transactions has been miscoded in one instance. It is easiest to remove the respective observation. Now, the categorical variables have to be turned into factors.
+```{r factors}
+df = df[!is.na(df$age),]
+
+df$m_status = as.factor(df$m_status)
+df$gender = as.factor(df$gender)
+df$enrollment = as.factor(df$enrollment)
+df$month = as.factor(ifelse(df$month == 1, "Jan", ifelse(df$month == 2, "Feb", ifelse(df$month == 3, "Mar", ifelse(df$month == 4, "Apr", ifelse(df$month == 5, "May", ifelse(df$month == 6, "Jun", ifelse(df$month == 7, "Jul", ifelse(df$month == 8, "Aug", ifelse(df$month == 9, "Sep", ifelse(df$month == 10, "Oct", ifelse(df$month == 11, "Nov", "Dec"))))))))))))
+```
+
+## I use one hot encoding to create dummy variable for the categorical valiables and finally turn is_online into a factor.
+```{r dummies}
+dmy = dummyVars(" ~ .", data = df)
+df = data.frame(predict(dmy, newdata = df))
+```
+
+## Summary of Data after Preparation
+```{r split_data, echo = FALSE}
+#your individual ids; 
+#make sure to change the studentid in the SQL-query
+testing = df[is.na(df[,"is_online"]),"receipt_id"] 
+#provide summary, without the unseen data
+df_pred = df[is.na(df[,"is_online"]),]
+df = df[!is.na(df[,"is_online"]),]
+df$is_online = as.factor(ifelse(df$is_online == 1, "yes", "no"))
+# summary(df)
+```
+
+# Modelling
+# Splitting the dataset for training and validation.
+```{r split_train}
+set.seed(7313)
+smp_siz = round(0.7*nrow(df))
+train_row = sample(seq_len(nrow(df)),size = smp_siz)
+train = df[train_row,]
+test = df[-train_row,]
+```
+
+#Model Evaluation: For modeling, we tested: logistic regression, ridge & lasso logistic regression, stepwise logistic regression, decision trees, random forest, and boosted trees (XGBoost). I selected AUC and accuracy as my primary performance metrics to evaluate the model performance since I wanted to obtain a model with an overall good performance that reduces both FNs and FPs. Based on these 2 metrics, the simple logistic regression with the 26 predictors was among the best performing models (Accuracy: 92.07%; AUC: 0.97). This compares against the baseline case of just predicting is_online by picking the mode 'no', which would have 92.66% of being correct. So, the logistic regressions performs only marginally better. In addition, I used the same dataset to train and tune a random forest model and achieved a slightly better performance (+0.28% in accuracy). In this business case, I want to predict whether an transaction is online, which is why the interpretability of the model is slightly more important to weight than performance. Therefore, taking into account the performance-interpretability-tradeoff and Occam’s Razor principle, I opted for the simple logistic regression model. Lastly, the training and test performance differed only marginally, pointing to a good bias-variance-tradeoff.
+
+# Training a logistic regression
+```{r logistic_regression, message = FALSE, warning = FALSE}
+train.control = trainControl(method = "repeatedcv", number = 10, repeats = 10, verboseIter = F, classProbs = T, summaryFunction = prSummary)
+
+set.seed(7313)
+logreg = train(is_online ~ . - receipt_id, data = train, method = "glm", metric = "Recall", trControl = train.control)
+
+# Training performance
+# logreg
+# summary(logreg)
+# confusionMatrix(logreg)
+```
+
+# Making predictions on the test datasets
+```{r predictions, message = FALSE, warning = FALSE}
+test.predictions = data.frame(pred = predict(logreg, newdata = test), obs = test$is_online)
+
+prob.predictions = predict(logreg, newdata = test, type = "prob")
+
+test.predictions = bind_cols(test.predictions, prob.predictions)
+test.predictions = test.predictions %>% mutate(obs = as.factor(obs)) %>% mutate(obs = factor(obs, levels = c("no", "yes")))
+
+confusionMatrix(test.predictions$pred, test.predictions$obs)
+twoClassSummary(test.predictions, lev = c("no", "yes"))
+prSummary(test.predictions, lev = c("no", "yes"))
+```
+
+```{r, include = FALSE}
+pred = data.frame(receipt_id = testing, pred = predict(logreg, newdata = df_pred))
+pred$pred = as.numeric(pred$pred)
+pred$pred = pred$pred - 1
+n = 42205
+write.csv(pred, paste(n,".csv",""))
+```
+
+**Submit the knitted pdf and the csv on Canvas**

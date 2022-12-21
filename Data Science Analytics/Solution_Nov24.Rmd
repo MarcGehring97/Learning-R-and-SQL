@@ -1,0 +1,328 @@
+---
+title: "7313 Data Science Analytics"
+output: webex::webex_default
+---
+
+```{r setup, include = FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+if (!requireNamespace("webex")) {
+  stop("You must have the 'webex' package installed to knit HTML from this template.\n   devtools::install_github(\"psyteachr/webex\")")
+} else {
+  library(webex)
+}
+```
+
+`r style_widgets(correct = "green")`
+
+<a name="top"></a>
+
+This page provides lab instructions for the *Modeling & Evaluation* module of 7313 Data Science Analytics at [Stockholm School of Economics](https://www.hhs.se).
+
+*NOTE: For this page to work properly, you need to have a JavaScript-enabled browser. If things are not showing, or appear broken, please ask for a printed copy of the lab instructions.*
+
+***
+
+# The lab
+
+The purpose of this lab is to practice modeling with statistical and machine learning. The focus is on ISLR Ch. 3-4: Linear Regression and Classification. This means you will: (a) import data from the MySQL-database, (b) split the dataset into a training and a test set, (c) train a linear regression model, (d) make predictions based on the test set and evaluate the performance of the model, (e) train a logistic regression model, and (f) make test set predictions and evaluate the accuracy. 
+
+***
+
+Throughout the lab, there will be buttons like the one below. These provide answers to questions in the text.
+
+`r hide("Click me")`
+<img src="http://giphygifs.s3.amazonaws.com/media/kKdgdeuO2M08M/giphy.gif" />
+`r unhide()`
+
+***
+
+There will also be some short questions for you to fill in.
+
+The primary function of these questions is to work as checkpoints for yourself—a kind of receipt that you are following along and understand what you are doing. The exact format of the questions may differ, but they are all <span style="color:blue">__blue__</span> when the answer is missing or wrong, and they turn <span style="color:green">__green__</span> when you enter the correct answer.
+
+***
+
+#### Import data from the MySQL-database
+
+We concluded the *Data Preparation*-module by importing a dataset, using the target “Proportion of Returns per Item” (named prop_returns) and the features “Division” (i.e., division_desc), and “Label” (i.e., sustainability_id_desc). Start by doing the same, remember to transform $Division$ and $Label$ to factors.  
+
+```{r sql_connect, include = F}
+library(RMySQL) 
+con = dbConnect(MySQL(), dbname = "BnL",
+                host = "mysql-1.cda.hhs.se", port = 3306,
+                user = "bnl", password = "bnl@sse")
+df = dbGetQuery(
+  con, 
+  "SELECT 
+  item, 
+  SUM(returned)/COUNT(returned) AS prop_returned, 
+  MIN(division_desc) AS division, 
+  MIN(sustainability_id_desc) AS label 
+  FROM Products 
+  JOIN Transactions 
+  USING (item) 
+  GROUP BY item")
+df$division = as.factor(df$division)
+df$label = as.factor(df$label)
+```
+
+Once you have imported data from the MySQL-connection, you can close all connections like this:
+
+```{r close_conn}
+lapply( dbListConnections( dbDriver( drv = "MySQL")), dbDisconnect)
+```
+
+
+#### Split the dataset into a training and a test set
+
+Split the dataset into 70% training set and 30% test set. 
+
+```{r split}
+set.seed(7313)   # set seed to ensure you always have same random numbers generated
+smp_siz = round(0.7*nrow(df))
+train_row = sample(seq_len(nrow(df)),size = smp_siz)  
+train = df[train_row,]
+test = df[-train_row,]
+```
+
+The number of items in the training set are: `r fitb(nrow(train))` (using seed 7313).
+
+*Note that if you use other functions than sample(), the results below will differ.*
+
+#### Train a simple linear regression model
+
+Refer to section 3.6.2 (Simple Linear Regression) and fit a linear regression model with proportion of returned products as target and division as feature. Use the train set instead of the entire dataset (cf. ISLR). Make sure that division is of class factor. 
+
+```{r lm, include = F}
+lm.fit = lm(prop_returned ~ division, data = train)
+confint(lm.fit)
+```
+
+What is a 95% confidence interval for the effect of the Home-division (use Beauty as omitted dummy variable to avoid the dummy trap; R does this automatically)?
+
+The confidence interval is given by [`r fitb(round(subset(confint(lm.fit), rownames(confint(lm.fit)) == 'divisionHome')[,1],4))`; `r fitb(round(subset(confint(lm.fit), rownames(confint(lm.fit)) == 'divisionHome')[,2],4))`] (round to four decimals).
+
+What is the predicted proportion of returned products when the product is in the Home-division? 
+
+`r hide("Hint")`
+
+```{r x}
+x = data.frame(division = "Home")
+x$division = as.factor(x$division)
+#use the predict-function and x as newdata
+#for documentation, use:
+#?predict.lm
+```
+
+`r unhide()`
+
+The predicted proportion of returned products is 
+`r fitb(round(predict(lm.fit, x),4))` (use 4 decimals). 
+
+#### Multiple linear regression
+
+Refer to section 3.6.3 (Multiple Linear Regression). This time, include also the label (omit Allergy and health). What is the $R^2$? 
+
+```{r lm.multi, include = F}
+lm.fit = lm(prop_returned ~ division + label, data = train)
+r2 = summary(lm.fit)$r.sq
+```
+
+The $R^2$ is `r fitb(round(r2,4))` (round to 4 decimals).
+
+The explained variance is very low. The book also offers some nice examples of how to make non-linear transformations of your features. This might improve accuracy, but we are instead going to proceed by recoding the target to a binary outcome. In this case, where so few products are returned, it makes more sense to better understand drivers of product returns by classification. 
+
+#### Train a logistic regression
+
+Refer to section 4.7.2 (Logistic regression). Re-code your target to a binary variable and then train a logistic regression.
+
+```{r glm, include = F}
+train$is_returned = ifelse(train$prop_returned>0,1,0)
+summary(train)
+glm.fit = glm(is_returned ~ division + label, data = train, family = "binomial")
+```
+
+*What is the estimate for the Home-coefficient?*
+
+The estimated coefficient is `r fitb(round(subset(summary(glm.fit)$coef, rownames(summary(glm.fit)$coef) == 'divisionHome')[,1],4))` (round to four decimals). 
+
+Notice how the log odds decreases when the division is Home this time. Last time, the model had a very low performance. Now, let us evaluate the training accuracy of the logistic regression. Use the approach described in the book the replicate the results (pass on newdata=train, such that you also get NA predictions for observations with missing values).
+
+```{r train.acc, include = F}
+#predicted probabilities based on training-set
+glm.probs = predict(glm.fit, train, type = "response")
+#glimpse of first 10
+glm.probs[1:10]
+#create a dataset where all predictions are 0 (is not returned)
+glm.pred = rep(0, nrow(train))
+#replace 0 with 1 if probability of return is above 0.5
+glm.pred[glm.probs>.5] = 1
+#attach train-dataset
+attach(train)
+#make a table of predictions vs true
+table(glm.pred, is_returned)
+#accuracy = percentage where predictions are the same as true
+acc = mean(glm.pred == is_returned)
+```
+
+*What is the percentage of training observations that are correctly classified using the fitted model?*
+
+The training accuracy is `r fitb(round(acc,4))` (round to four decimals).
+
+*Note, we have not dealt with missing values. The lm- and glm-functions automatically excludes these when fitting the model. This means that when we provide the missing values to the model, there will be no predictions. By replicating the approach in the book, we first predict that no product are returns---including also those with missing values---and then replace the predictions whenever the probability is above 50% that a product would be returned. Thus, all products with missing values are predicted that they will not be returned. Given that this is the most likely outcome perhaps that is a reasonable approach, but if we handle the missing values with imputation we might improve accuracy further.* 
+
+The accuracy percentage seems pretty promising, but in later labs we will cover the precision and recall as alternative performance measures. Before that, we also want to check if the model is performing well on unseen data. Remember how we started by splitting the dataset into a training and a test set. Use the test set to make the predictions instead.
+
+`r hide("Hint")`
+
+In the book example, the test set is referred to as Smarket.2005. When you split the data in the beginning of the lab, you might have referred to the test data as $test$. Remember to re-code the target variable.
+
+`r unhide()`
+
+```{r test.acc, include = F}
+test$is_returned = ifelse(test$prop_returned>0,1,0)
+glm.probs = predict(glm.fit, test, type = "response")
+glm.probs[1:10]
+glm.pred = rep(0, nrow(test))
+glm.pred[glm.probs>.5] = 1
+detach()
+attach(test)
+table(glm.pred, is_returned)
+acc = mean(glm.pred == is_returned)
+```
+
+*What is the percentage of unseen observations that are correctly classified using the fitted model?*
+
+The test accuracy is `r fitb(round(acc,4))` (round to four decimals). 
+
+The resulting accuracy of predictions of unseen data is higher than if we had made random guesses. Question is, was it better than if we would have predicted that no products were returned? Such heuristic would have been right about **`r round(nrow(test[test$is_returned==0,])/nrow(test),2)`** (`r 100*round(nrow(test[test$is_returned==0,])/nrow(test),2)`%) of the times. An alternative measure to Accuracy is thus the Kappa, calculated as the percentage of (correct classifications - random accuracy) / (1 - random accuracy). Other measurements are Specificity, Sensitivity/Recall and Precision (and the F1 and F2 scores that balance these). In ISLR there are several examples of when domain knowledge must be used to determine what matters most. For example, in fraud detection or in predicting who will purchase a caravan, the Sensitivity is more important than the Accuracy.
+
+*If BnL aims to identify items that are returned, what performance measurement is most important?*
+
+`r mcq(c("Specificity", answer = "Sensitivity/Recall", "Precision"))`
+
+##### Extra: ROC-curves 
+
+The book mentions ROC-curves to be used to evaluate a the trade-off between Sensitivity and Specificity. In other words, we could predict that all are positives and thus achieve a high Sensitivity, but it would be at the expense of Specificity (we would not identify any of the negatives). Based on your logit-model, you can plot an ROC-curve like below (use the predict.glm-function to predict probabilities and use the results to call the plot.roc-function (in the pROC-package).  
+
+```{r, echo = F, message = F}
+pred = predict(glm.fit, train, type = "response")
+library(pROC)
+plot.roc(train$is_returned, pred, percent = T, main = "ROC-curve: Logit")
+``` 
+
+*What is an optimal ROC-curve?*
+
+`r hide("Answer")`
+One that hugs the left corner.  
+`r unhide()`
+
+##### Extra: AUC
+
+The total area under the ROC curve--the AUC--is an alternative numerical measure that captures whether we are making trade-offs between Sensitivity and Specificity. In other words, the AUC is the probability of distinguishing classes. (If you store the plot.roc as an object, auc is also stored.)
+
+*What is the AUC?*
+
+```{r auc, include = F}
+cv.roc = plot.roc(train$is_returned, pred)
+cv.auc = round(cv.roc$auc[1]*100,0)
+```
+
+The area under the roc curve is: `r fitb(cv.auc)` % (use no decimals)
+
+*What is the worse possible AUC when predicting two classes?*
+
+`r hide("Answer")`
+It is 50%. 
+`r unhide()`
+
+***
+
+Great job! You have now chosen a target and predictor variables, accessed data from a MySQL-database and trained several machine learning models and evaluated their performance. Take a moment to reflect upon whether this is a good model. 
+
+Ultimately, we want to understand drivers of returned products. If the model is good, then it makes sense to start exploring the importance of the features in the model. However, when the model is poor (as in this case), then we might need to re-consider the used features or handling missing data differently before we start using more advanced models.
+
+***
+
+# Acknowledgements
+
+This page was built in R using the amazing [webex package](https://github.com/PsyTeachR/webex) and a template created by the [psychology teaching team at the University of Glasgow](http://www.psy.gla.ac.uk).
+
+***
+
+[Back to the top.](#top)
+
+***
+
+<!--
+# SLASK
+
+The webex package provides a number of functions that you use in [inline R code](https://github.com/rstudio/cheatsheets/raw/master/rmarkdown-2.0.pdf) to create HTML widgets (text boxes, pull down menus, buttons that reveal hidden content). Examples are given below. Knit this file to HTML to see how it works.
+
+**NOTE: To use the widgets in the compiled HTML file, you need to have a JavaScript-enabled browser. The widgets don't work in the built-in RStudio browser. In the built-in browser, click the "Open in Browser" button to open the file in your operating system's browser.**
+
+## Fill-In-The-Blanks (`fitb()`)
+
+Create fill-in-the-blank questions using `fitb()`, providing the answer as the first argument.
+
+- 2 + 2 is `r fitb("4")`
+
+You can also create these questions dynamically, using variables from your R session.
+
+```{r echo = FALSE}
+x <- sample(2:8, 1)
+```
+
+- The square root of `r x^2` is: `r fitb(x)`
+
+The blanks are case-sensitive; if you don't care about case, use the argument `ignore_case = TRUE`.
+
+- What is the letter after D? `r fitb("E", ignore_case = TRUE)`
+
+If you want to ignore differences in whitespace use, use the argument `ignore_ws = TRUE` (which is the default) and include spaces in your answer anywhere they could be acceptable.
+
+- How do you load the tidyverse package? `r fitb(c("library( tidyverse )", "library( \"tidyverse\" )", "library( 'tidyverse' )"), ignore_case = TRUE, width = "20", regex = TRUE)`
+
+You can set more than one possible correct answer by setting the answers as a vector.
+
+- Type a vowel: `r fitb(c("A", "E", "I", "O" , "U"), ignore_case = TRUE)`
+
+## Multiple Choice (`mcq()`)
+
+- "Never gonna give you up, never gonna: `r mcq(c("let you go", "turn you down", "run away", answer = "let you down"))`"
+- "I `r mcq(c(answer = "bless the rains", "guess it rains", "sense the rain"))` down in Africa" -Toto
+
+## True or False (`torf()`)
+
+- True or False? You can permute values in a vector using `sample()`. `r torf(TRUE)`
+
+## Hidden solutions and hints
+
+You can fence off a solution area that will be hidden behind a button using `hide()` before the solution and `unhide()` after, each as inline R code.  Pass the text you want to appear on the button to the `hide()` function.
+
+If the solution is an RMarkdown code chunk, instead of using `hide()` and `unhide()`, simply set the `webex.hide` chunk option to TRUE, or set it to the string you wish to display on the button.
+
+### Example problem
+
+**Recreate the scatterplot below, using the built-in `cars` dataset.**
+
+```{r echo = FALSE}
+with(cars, plot(speed, dist))
+```
+
+`r hide("I need a hint")`
+See the *documentation* for `plot()` (`?plot`)
+`r unhide()`
+
+-->
+
+<!-- note: you could also just set webex.hide to TRUE -->
+
+<!-- TO CHANGE WIDGET COLOURS:
+  move command below out of this HTML comment area
+  and then re-compile;
+  unfilled becomes yellow, correct becomes pink 
+     
+`r style_widgets("#FFFF00", "#FF3399")`
+-->

@@ -1,0 +1,243 @@
+---
+title: "7313 Data Science Analytics"
+output: webex::webex_default
+---
+
+```{r setup, include = FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+if (!requireNamespace("webex")) {
+  stop("You must have the 'webex' package installed to knit HTML from this template.\n   devtools::install_github(\"psyteachr/webex\")")
+} else {
+  library(webex)
+}
+```
+
+`r style_widgets(correct = "green")`
+
+<a name="top"></a>
+
+This page provides lab instructions for the *Modeling & Evaluation* module of 7313 Data Science Analytics at [Stockholm School of Economics](https://www.hhs.se).
+
+*NOTE: For this page to work properly, you need to have a JavaScript-enabled browser. If things are not showing, or appear broken, please ask for a printed copy of the lab instructions.*
+
+***
+
+# The lab
+
+The purpose of this lab is to practice modeling with statistical and machine learning. The focus is on ISLR Ch. 5: Resampling Methods. We will focus on different resampling methods using the logistic regression-model. You can follow the book, or you can use the caret-package. The caret-package includes tools for model tuning and resampling, among other functionality.
+
+***
+
+Throughout the lab, there will be buttons like the one below. These provide answers to questions in the text.
+
+`r hide("Click me")`
+<img src="http://giphygifs.s3.amazonaws.com/media/kKdgdeuO2M08M/giphy.gif" />
+`r unhide()`
+
+***
+
+There will also be some short questions for you to fill in.
+
+The primary function of these questions is to work as checkpoints for yourself—a kind of receipt that you are following along and understand what you are doing. The exact format of the questions may differ, but they are all <span style="color:blue">__blue__</span> when the answer is missing or wrong, and they turn <span style="color:green">__green__</span> when you enter the correct answer.
+
+***
+
+#### Import data from the MySQL-database
+
+Import a dataset, using the target “Is_returned” (i.e., whether a product has been returned or not) and the features “Division” (i.e., division_desc), and “Label” (i.e., sustainability_id_desc). Aggregated on the item-level, as in the previous lab. Transform all variables to factors.  
+
+```{r sql_connect, include = F}
+library(RMySQL) 
+con = dbConnect(MySQL(), dbname = "BnL",
+                host = "mysql-1.cda.hhs.se", port = 3306,
+                user = "bnl", password = "bnl@sse")
+df = dbGetQuery(
+  con, 
+  "SELECT 
+  item, 
+  IF(SUM(returned)/COUNT(returned)>0,1,0) AS is_returned, 
+  MIN(division_desc) AS division, 
+  MIN(sustainability_id_desc) AS label 
+  FROM Products 
+  JOIN Transactions 
+  USING (item) 
+  GROUP BY item")
+df$division = as.factor(df$division)
+df$label = as.factor(df$label)
+df$is_returned = as.factor(df$is_returned)
+```
+
+Split the dataset into 70% training set and 30% test set (same way as in the previous lab). 
+
+```{r split, echo = F}
+set.seed(7313)   # set seed to ensure you always have same random numbers generated
+smp_siz = round(0.7*nrow(df))
+train_row = sample(seq_len(nrow(df)),size = smp_siz)  
+train = df[train_row,]
+test = df[-train_row,]
+```
+
+#### LOOCV
+
+With Leave One Out Cross-Validation, one single observation is left out for validation. This is repeated n times, where n is the total number of observations (i.e. every observation is held out once). How long do you think it will take to train a logistic-model `r fitb(nrow(na.omit(train)))` times (exclude NAs from the train-set)? You might want to grab a coffee while waiting (or skip running this script for now). 
+
+Notice also how we omit missing values (listwise), since the function does not know how to deal with missing values. In the *Data Preparation*-module we covered also imputation instead of removal. This is a better approach. Now that you have learned to make predictions, an alternative to imputing the mean is to impute predicted values. For the sake of practice during these labs, we will simply remove the missing values. 
+
+```{r eval = F}
+#book-approach
+library(boot)
+glm.fit = glm(is_returned ~ division + label, na.omit(train), family = "binomial")
+#book example is regression, specify a binary classification cost-function:
+cost = function(r, pi) mean(abs(r-pi) > .5)
+cv.err = cv.glm(na.omit(train), glm.fit, cost = cost)
+cv.err$delta
+#caret-approach
+library(caret)
+trControl = trainControl(method = "LOOCV")
+set.seed(7313)
+loocv.fit = train(is_returned ~ division + label, data = na.omit(train), trControl = trControl, method = "glm", family = "binomial")
+print(loocv.fit)
+``` 
+
+#### k-fold CV
+
+For two main reasons, we might want to run k-fold cross-validation instead. LOOCV is a special case, where k is the total number of observations. We can leave out more than 1 observation in our validation set, namely k observations. The default is often 5 or 10. One main advantage of k-fold cv rather than LOOCV is the computational capacity required. The other has to do with the bias-variance trade-off. 
+
+*What is the benefit of k-fold cv to LOOCV in terms of the bias-variance trade-off?*
+
+`r hide("Answer")`
+With k-fold cv, we avoid overfitting.
+`r unhide()`
+
+In the caret-package documentation, you can find the parameters that need to be set in trainControl. If you set.seed(7313), your output from training a logit-model with 10-fold cross-validation should provide the following output, if you "print(cv.fit)" (see example code above).
+
+*Estimated prediction error using book-approach:*
+```{r echo = F, warning = F}
+#book-approach
+library(boot)
+glm.fit = glm(is_returned ~ division + label, na.omit(train), family = "binomial")
+cost = function(r, pi) mean(abs(r-pi) > .5)
+cv.err = cv.glm(na.omit(train), glm.fit, cost = cost, K = 10)
+cv.err$delta
+```
+
+*Estimated accuracy using Caret:*
+```{r echo = F, warning = F, message = F}
+#Caret-approach
+library(caret)
+trControl = trainControl(method="cv", number = 10)
+set.seed(7313)
+cv.fit = train(is_returned ~ division + label, data = na.omit(train), trControl = trControl, method = "glm", family = "binomial")
+print(cv.fit)
+```
+
+The caret-package also support a repeated cv. Change the repeat-parameter to say 10. We then perform 10-fold cross-validation repeated 10 times. This means we train 10*10 = 100 models rather than n = `r nrow(na.omit(train))` as for the LOOCV. 
+
+#### Bootstrap
+
+We can also take a sample from our training set, using replacement, and do this repeatedly. The method is called "boot", and by default we run 25 repetitions. Try changing the method-parameter in the trainControl-function such that you get the following output from printing the model fit (or follow the book-approach). 
+
+```{r echo = F, warning = F }
+trControl = trainControl(method="boot")
+set.seed(7313)
+#note: warnings are suppressed
+boot.fit = train(is_returned ~ division + label, data = na.omit(train), trControl = trControl, method = "glm", family = "binomial")
+print(boot.fit)
+```
+
+Based on the cross-validation approach, is there any indication that overfitting is a concern?
+
+`r mcq(c(answer = "No", "Yes"))`
+
+If it was (i.e., accuracy is greatly changing depending on which observations we are including), then we shall go deeper into that. Most likely, it means that the model would not perform well on unseen data.
+
+[Back to the top.](#top)
+
+***
+
+Great job! You have now chosen a target and predictor variables, accessed data from a MySQL-database and trained several machine learning models using cross-validation to avoid overfitting. 
+
+***
+
+# Acknowledgements
+
+This page was built in R using the amazing [webex package](https://github.com/PsyTeachR/webex) and a template created by the [psychology teaching team at the University of Glasgow](http://www.psy.gla.ac.uk).
+
+***
+
+[Back to the top.](#top)
+
+***
+
+<!--
+# SLASK
+
+The webex package provides a number of functions that you use in [inline R code](https://github.com/rstudio/cheatsheets/raw/master/rmarkdown-2.0.pdf) to create HTML widgets (text boxes, pull down menus, buttons that reveal hidden content). Examples are given below. Knit this file to HTML to see how it works.
+
+**NOTE: To use the widgets in the compiled HTML file, you need to have a JavaScript-enabled browser. The widgets don't work in the built-in RStudio browser. In the built-in browser, click the "Open in Browser" button to open the file in your operating system's browser.**
+
+## Fill-In-The-Blanks (`fitb()`)
+
+Create fill-in-the-blank questions using `fitb()`, providing the answer as the first argument.
+
+- 2 + 2 is `r fitb("4")`
+
+You can also create these questions dynamically, using variables from your R session.
+
+```{r echo = FALSE}
+x <- sample(2:8, 1)
+```
+
+- The square root of `r x^2` is: `r fitb(x)`
+
+The blanks are case-sensitive; if you don't care about case, use the argument `ignore_case = TRUE`.
+
+- What is the letter after D? `r fitb("E", ignore_case = TRUE)`
+
+If you want to ignore differences in whitespace use, use the argument `ignore_ws = TRUE` (which is the default) and include spaces in your answer anywhere they could be acceptable.
+
+- How do you load the tidyverse package? `r fitb(c("library( tidyverse )", "library( \"tidyverse\" )", "library( 'tidyverse' )"), ignore_case = TRUE, width = "20", regex = TRUE)`
+
+You can set more than one possible correct answer by setting the answers as a vector.
+
+- Type a vowel: `r fitb(c("A", "E", "I", "O" , "U"), ignore_case = TRUE)`
+
+## Multiple Choice (`mcq()`)
+
+- "Never gonna give you up, never gonna: `r mcq(c("let you go", "turn you down", "run away", answer = "let you down"))`"
+- "I `r mcq(c(answer = "bless the rains", "guess it rains", "sense the rain"))` down in Africa" -Toto
+
+## True or False (`torf()`)
+
+- True or False? You can permute values in a vector using `sample()`. `r torf(TRUE)`
+
+## Hidden solutions and hints
+
+You can fence off a solution area that will be hidden behind a button using `hide()` before the solution and `unhide()` after, each as inline R code.  Pass the text you want to appear on the button to the `hide()` function.
+
+If the solution is an RMarkdown code chunk, instead of using `hide()` and `unhide()`, simply set the `webex.hide` chunk option to TRUE, or set it to the string you wish to display on the button.
+
+### Example problem
+
+**Recreate the scatterplot below, using the built-in `cars` dataset.**
+
+```{r echo = FALSE}
+with(cars, plot(speed, dist))
+```
+
+`r hide("I need a hint")`
+See the *documentation* for `plot()` (`?plot`)
+`r unhide()`
+
+-->
+
+<!-- note: you could also just set webex.hide to TRUE -->
+
+<!-- TO CHANGE WIDGET COLOURS:
+  move command below out of this HTML comment area
+  and then re-compile;
+  unfilled becomes yellow, correct becomes pink 
+     
+`r style_widgets("#FFFF00", "#FF3399")`
+-->

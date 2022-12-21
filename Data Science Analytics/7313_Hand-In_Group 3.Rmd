@@ -1,0 +1,189 @@
+---
+title: "7313 Hand-in"
+author: Group 3
+date: '2021-11-22'
+output:
+  pdf_document: 
+    fig_height: 3
+  html_notebook: default
+header-includes:
+- \usepackage{fancyhdr}
+- \pagestyle{fancy}
+- \fancyhead[C]{Data Science Analytics}
+- \fancyfoot[C]{\thepage}
+---
+
+```{r, include = FALSE, message = FALSE}
+#Load libraries
+require(RMySQL) 
+require(tidyverse)
+require(mice)
+require(data.table)
+require(corrplot)
+require(GGally)
+library(modeest) 
+```
+
+```{r, message = FALSE}
+#Creating connection to MySQL database
+con = dbConnect(MySQL(), dbname = "BnL",
+                host = "mysql-1.cda.hhs.se", port = 3306,
+                user = "bnl", password = "bnl@sse")
+```
+
+```{r, message = FALSE}
+#Loading data into R
+df <- dbGetQuery(con,"SELECT item, returned, amount, discount, quantity, dept_desc, sustainability_id_desc
+                     FROM Transactions t LEFT JOIN Products p
+                     USING(item)")
+glimpse(df)
+#summary(df)
+```
+
+```{r, message = FALSE}
+#Checking for missing values
+contains.missing <- df %>% 
+  filter_all(any_vars(is.na(.))) %>% 
+  select_if(function(x) any(is.na(x)))
+#contains.missing
+
+df %>% 
+  sapply(function(x) sum(is.na(x)))
+md.pattern(df, rotate.names = T)
+```
+
+```{r, message = FALSE}
+#Imputation of missing values
+##Mode imputation for variables of type character and mean imputation for variables of type double
+mode_dept_desc <- df %>% 
+  filter(!is.na(dept_desc)) %>% 
+  count(dept_desc) %>% 
+  top_n(1, n) %>% 
+  select(dept_desc) %>% 
+  unlist(use.names = F)
+mode_sustainability_id_desc <- df %>% 
+  filter(!is.na(sustainability_id_desc)) %>% 
+  count(sustainability_id_desc) %>% 
+  top_n(1, n) %>% 
+  select(sustainability_id_desc) %>% 
+  unlist(use.names = F)
+
+df_clean <- df %>% 
+  mutate(amount = ifelse(is.na(amount), mean(amount, na.rm = T), amount),
+         discount = ifelse(is.na(discount), mean(discount, na.rm = T), discount),
+         dept_desc = ifelse(is.na(dept_desc), mode_dept_desc, dept_desc),
+         sustainability_id_desc = ifelse(is.na(sustainability_id_desc), mode_sustainability_id_desc, sustainability_id_desc))
+
+#Final check
+df_clean %>% 
+  sapply(function(x) sum(is.na(x)))
+md.pattern(df_clean, rotate.names = T)
+#iersummary(df_clean)
+glimpse(df_clean)
+
+#Remove modes + support table
+remove(mode_dept_desc, mode_sustainability_id_desc, contains.missing)
+```
+
+```{r, message = FALSE}
+#Exclusion of non-product-related observations (Receipt texts, Gift With Purchase, Marketing Material, Sales Kicks E-commerce)
+df_clean <- df_clean %>% 
+  mutate(no_product = ifelse(dept_desc == "Receipt texts", 1, 
+                             ifelse(dept_desc == "Gift With Purchase", 1,
+                                    ifelse(dept_desc == "Marketing Material", 1, 
+                                           ifelse(dept_desc == "Sales Kicks E-commerce", 1, 0)))))
+df_clean <- df_clean %>% 
+  filter(no_product == 0)
+df_clean <- df_clean %>% 
+  select(-no_product)
+```
+
+```{r, message = FALSE}
+#Creation of new variables
+##Sustainable
+df_clean <- df_clean %>% 
+  mutate(sustainable = ifelse(sustainability_id_desc == "Environmentally labelled", "sustainable", 
+                              ifelse(sustainability_id_desc == "Organic", "sustainable", 
+                                     ifelse(sustainability_id_desc == "Social responsibility", "sustainable",
+                                            ifelse(sustainability_id_desc == "Sustainable material", "sustainable", "non-sustainable")))))
+      
+##Category
+df_clean  <- df_clean  %>% 
+  mutate(category = ifelse(dept_desc == "Makeup B", "Makeup",
+                            ifelse(dept_desc == "Makeup PL", "Makeup",
+                                   ifelse(dept_desc == "Face B", "Face", 
+                                          ifelse(dept_desc == "Face PL", "Face",
+                                                 ifelse(dept_desc == "Body B", "Body",
+                                                        ifelse(dept_desc == "Body PL", "Body",
+                                                               ifelse(dept_desc == "Hair B", "Hair",
+                                                                      ifelse(dept_desc == "Hair PL", "Hair",
+                                                                             ifelse(dept_desc == "Hair C", "Hair",
+                                                                                    ifelse(dept_desc == "Fragrance B", "Fragrance",
+                                                                                           ifelse(dept_desc == "Fragrance PL", "Fragrance",
+                                                                                                  ifelse(dept_desc == "Womens Accessories C", "Accessories",
+                                                                                                         ifelse(dept_desc == "Womens Hosiery C", "Hosiery",
+                                                                                                                ifelse(dept_desc == "Treatments", "Treatments",
+                                                                                                                       ifelse(dept_desc == "Wellness & Sport B", "Wellness & Sport",
+                                                                                                                              ifelse(dept_desc == "Miscellaneous", "Other",
+                                                                                                                                     ifelse(dept_desc == "Childrens Care B", "Childrens Care",
+                                                                                                                                            ifelse(dept_desc == "Cooking & Dining B", "Cooking & Dining",
+                                                                                                                                                   ifelse(dept_desc == "Girls Clothes PL", "Other",
+                                                                                                                                                          ifelse(dept_desc == "Womens Bags PL", "Accessories", "Accessories")))))))))))))))))))))
+
+#Final check
+glimpse(df_clean)
+df_clean %>% 
+  group_by(category, dept_desc) %>% 
+  count()
+
+#Removal of 'old' variables
+df_clean <- df_clean %>% 
+  select(-dept_desc, -sustainability_id_desc)
+```
+
+```{r, message = FALSE}
+#Ensuring correct aggregation levels of variables
+df_final <- df_clean %>%  
+  group_by(item) %>% 
+  summarize(total_quantity = sum(quantity[quantity>=0]),
+            avg_amount = mean(amount[amount>=0]),
+            avg_discount = mean(discount[discount>=0])/mean(amount[amount>=0]),
+            per_returned = sum(abs(quantity)[returned==1])/sum(quantity[quantity>=0]),
+            mode_category = mfv(category),
+            mode_sustainable = mfv(sustainable)) 
+```
+
+```{r, message = FALSE}
+#Renaming of columns/ variable
+df_final <- df_final %>% 
+  rename(category = mode_category,
+         sustainability = mode_sustainable,
+         percentage_returned = per_returned)
+
+#Ensuring correct data types
+glimpse(df_final)
+
+df_final <- df_final %>% 
+  mutate(item = as.factor(item),
+         sustainability = as.factor(sustainability),
+         category = as.factor(category))
+
+#Checking for missing values
+df_final %>% 
+  sapply(function(x) sum(is.na(x)))
+md.pattern(df_final, rotate.names = T)
+
+#Deleting 34 items w/ missing values - missing values arising due to failures in calculations for aggregated values (e.g., product wasn't sold in provided data time frame/ was only returned/ was purchased but at zero amount)
+df_final <- df_final %>% 
+	filter_all(all_vars(!is.na(.)))
+```
+
+```{r}
+#Final presentation of variables
+head(df_final, 10)
+glimpse(df_final)
+
+#aggregation level: item
+#target: percentage_returned
+#predictors: total_quantity, avg_amount, avg_discount, category, sustainability
+```
